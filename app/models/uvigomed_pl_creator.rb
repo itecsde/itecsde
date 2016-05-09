@@ -1,0 +1,433 @@
+# encoding: utf-8
+
+require "nokogiri"
+require "open-uri"
+require 'capybara/rails'
+require "capybara"
+require "capybara/dsl"
+require 'watir-webdriver'
+require 'net/http'
+require 'net/https'
+require 'uri'
+require 'mechanize'
+
+class UvigomedPlCreator
+   include ActionView::Helpers::SanitizeHelper
+   ###############################################################
+   #######
+   ###############################################################
+   def obtain_mesh_categories
+      begin
+         url_mesh_categories = "http://www.ncbi.nlm.nih.gov/mesh/1000067"
+         nokogiri_html_page = Nokogiri::HTML(open(url_mesh_categories, "User-Agent" => "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:29.0) Gecko/20100101 Firefox/29.0"))
+         mesh_categories = Array.new
+         nokogiri_html_page.css("div.rprt.abstract ul ul ul").each do |mesh_category|
+            if !mesh_category.css("ul").empty?
+               mesh_categories << mesh_category.css("a")[0].text
+            end
+         end
+         #mesh_categories.each do |cat|
+         #   puts
+         #   printf "%-65s %s\n", cat.strip, "-->"
+         #end
+         puts mesh_categories
+         return mesh_categories
+      rescue Exception => e
+         puts "Exception obtain_mesh_categories"
+         puts e.messageRe
+         puts e.backtrace.inspect
+      end
+   end
+
+   def create_pl_uvigomed_corpus(language, deadline)
+      begin
+         mesh_categories = obtain_mesh_categories
+
+         mesh_categories = ["Respiratory Tract Diseases"]
+
+         mesh_categories.each do |mesh_category|
+            status = scrape_category_pubmed mesh_category, language, deadline
+            if status == "deadline"
+               puts "Deadline alcanzado en create_uvigomed_corpus"
+            end
+         end
+      rescue Exception => e
+         puts "Exception create_uvigomed_corpus"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   def scrape_category_pubmed(mesh_category, language, deadline)
+      begin
+         Capybara.register_driver :selenium do |app|
+            Capybara::Selenium::Driver.new(app)
+         end
+         Capybara.javascript_driver = :selenium
+         session = Capybara::Session.new(:selenium)
+
+         puts "Scraping " + mesh_category + " category"
+         url_search_pubmed = URI.encode('http://www.ncbi.nlm.nih.gov/pubmed/?term=' + mesh_category + '[Mesh]+' + language + '[Language]')
+
+         session.visit(url_search_pubmed)
+         session.click_link "Sort by Most Recent"
+         sleep 2
+         session.choose "PublicationDate"
+         sleep 2
+         session.click_link "Abstract"
+
+         while 1
+            nokogiri_html_page = Nokogiri::HTML(session.body)
+            nokogiri_html_page.css("div#maincontent.col.seven_col div.content div div.rprt div.rslt p.title a").each do |pubmed_article|
+               url_pubmed_article = "http://www.ncbi.nlm.nih.gov" + pubmed_article['href']
+               status = scrape_article_pubmed url_pubmed_article, mesh_category, deadline
+               if status == "scraped"
+                  #no hacemos nada, continua la ejecucion
+                  elsif status == "no_abstract"
+                     #no hacemos nada, continua la ejecucion
+                     elsif status == "deadline"
+                        puts "Deadline alcanzado en scrape_category"
+                        session.driver.browser.quit
+                        return "deadline"
+                     end
+            end
+            session.click_on "Next >"
+         end
+
+      rescue Exception  => e
+         puts "Exception create_uvigomed_corpus"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   #def scrape_article_pubmed(url_pubmed_article)
+   def scrape_article_pubmed(url_pubmed_article, mesh_category, deadline)
+      begin
+         scraped_article = ReutersNewItem.new
+         nokogiri_html_page = Nokogiri::HTML(open(url_pubmed_article, "User-Agent" => "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:29.0) Gecko/20100101 Firefox/29.0"))
+         #Obtenemos el xml del artículo
+         nokogiri_xml_page = Nokogiri::HTML(open(url_pubmed_article + "?report=xml&format=text", "User-Agent" => "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:29.0) Gecko/20100101 Firefox/29.0"))
+         body = nokogiri_xml_page.css("html body").text
+         #Lo convertimos a un Hash
+         xml_hash = Hash.from_xml(body.gsub("\n",""))
+         #Lo serializamos para guardarlo en db
+         serialized_hash_xml_article = xml_hash.to_yaml
+         day = xml_hash["PubmedArticle"]["MedlineCitation"]["DateCreated"]["Day"]
+         month = xml_hash["PubmedArticle"]["MedlineCitation"]["DateCreated"]["Month"]
+         year = xml_hash["PubmedArticle"]["MedlineCitation"]["DateCreated"]["Year"]
+         date = year + "-" + month + "-" + day
+         date = Date.parse(date)
+
+         if date < Date.parse(deadline)
+            puts "Deadline alcanzado"
+            return "deadline"
+         end
+
+         # if abstract is only available in one language (english)
+         if nokogiri_html_page.css("div.content div.rprt_all div.rprt.abstract div.abstr div.other_lang").empty?
+            title = nokogiri_html_page.css("div.content div.rprt_all div.rprt.abstract h1").text.strip.gsub("[","").gsub("]","")
+            abstract = ""
+            nokogiri_html_page.css("div.content div.rprt_all div.rprt.abstract div.abstr div abstracttext").each do |abstract_paragraph|
+               abstract = abstract + abstract_paragraph.text
+            end
+
+            external_journal = ""
+            external_url = ""
+            if !nokogiri_html_page.css("div.supplemental.col.three_col.last div div.icons.portlet a img").empty?
+               external_journal = nokogiri_html_page.css("div.supplemental.col.three_col.last div div.icons.portlet a img")[0]['title'].strip
+               external_url = nokogiri_html_page.css("div.supplemental.col.three_col.last div div.icons.portlet a")[0]['href'].strip
+            end
+
+            scraped_article.name = title
+            scraped_article.description = abstract
+            scraped_article.topics = mesh_category
+            scraped_article.file_id = url_pubmed_article
+            scraped_article.companies = serialized_hash_xml_article
+            scraped_article.dateline = date
+            scraped_article.people = "en"
+            scraped_article.places = external_journal
+            scraped_article.persist
+
+            external_journals_allowed = ["Read full text in Scientific Electronic Library Online",
+               "Read full text in Ediciones Doyma, S.L.",
+               "Read full text in Elsevier Science"]
+
+            if external_journals_allowed.include? external_journal
+               if external_journal == "Read full text in Scientific Electronic Library Online"
+                  external_spanish_title, external_spanish_abstract = scrape_spanish_title_abstract_scielo(external_url)
+               elsif external_journal == "Read full text in Ediciones Doyma, S.L."
+                  external_spanish_title, external_spanish_abstract = scrape_spanish_title_abstract_ediciones_doyma(external_url)
+               elsif external_journal == "Read full text in Elsevier Science"
+                  external_spanish_title, external_spanish_abstract = scrape_spanish_title_abstract_elsevier(external_url)
+               end
+
+               scraped_article = ReutersNewItem.new
+               scraped_article.name = external_spanish_title
+               scraped_article.description = external_spanish_abstract
+               scraped_article.topics = mesh_category
+               scraped_article.file_id = url_pubmed_article
+               scraped_article.companies = serialized_hash_xml_article
+               scraped_article.dateline = date
+               scraped_article.people = "es"
+            scraped_article.persist
+            end
+
+            return "scraped"
+
+         else # if abstract is available in more than one language (spanish-english)
+         # First we obtain the abstract in english and save the document
+            title = nokogiri_html_page.css("div.content div.rprt_all div.rprt.abstract h1").text.strip.gsub("[","").gsub("]","")
+            abstract = ""
+            nokogiri_html_page.css("div.content div.rprt_all div.rprt.abstract div.abstr div.abstr_eng p abstracttext").each do |abstract_paragraph|
+               abstract = abstract + abstract_paragraph.text
+            end
+            scraped_article.name = title
+            scraped_article.description = abstract
+            scraped_article.topics = mesh_category
+            scraped_article.file_id = url_pubmed_article
+            scraped_article.companies = serialized_hash_xml_article
+            scraped_article.dateline = date
+            scraped_article.people = "en"
+            scraped_article.persist
+
+            #then whe obtain the abstract in spanish and save the document
+            title_spanish = nokogiri_html_page.css("div.content div.rprt_all div.rprt.abstract div.abstr div.abstr_SPA p")[0].text.strip
+            abstract_spanish = ""
+            nokogiri_html_page.css("div.content div.rprt_all div.rprt.abstract div.abstr div.other_lang div.abstr_SPA p abstracttext").each do |abstract_paragraph|
+               abstract_spanish = abstract_spanish + abstract_paragraph.text
+            end
+            abstract_spanish = abstract_spanish.gsub(title_spanish,"")
+            scraped_article = ReutersNewItem.new
+            scraped_article.name = title_spanish
+            scraped_article.description = abstract_spanish
+            scraped_article.topics = mesh_category
+            scraped_article.file_id = url_pubmed_article
+            scraped_article.companies = serialized_hash_xml_article
+            scraped_article.dateline = date
+            scraped_article.people = "es"
+         scraped_article.persist
+         end
+      rescue Exception => e
+         puts "Exception scrape_article_pubmed"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   def scrape_spanish_title_abstract_scielo(url)
+      # This function scrapes the title and abstract in Spanish
+      # of an article from scielo journal
+      # Returns: spanish_title and spanish_abstract
+      begin
+         url_host = url.split("/scielo.php")[0]
+         url_pid = url.split("&pid=")[1]
+         url_pid = url_pid.split("&lng")[0]
+         spanish_abstract = ""
+         spanish_title = ""
+         xml_url = url_host + "/scieloOrg/php/articleXML.php?pid=" + url_pid + "&lang=en"
+         xml_page = Nokogiri::XML(open(xml_url, "User-Agent" => "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:29.0) Gecko/20100101 Firefox/29.0"))
+         titles = xml_page.xpath("//article/front/article-meta/title-group/article-title")
+         titles.each do |title|
+            if title['xml:lang'] == "es"
+            spanish_title = title.text.strip
+            end
+         end
+         abstracts = xml_page.xpath("//article/front/article-meta/abstract")
+         abstracts.each do |abstract|
+            if abstract['xml:lang'] == "es"
+            spanish_abstract = abstract.text.strip
+            end
+         end
+         puts
+         puts "Title: " + spanish_title
+         puts
+         puts spanish_abstract
+         puts
+         return spanish_title, spanish_abstract
+      rescue Exception => e
+         puts "Exception scrape_spanish_title_abstract_scielo"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   def scrape_spanish_title_abstract_elsevier(url)
+      # This function scrapes the title and abstract in Spanish
+      # of an article from elsevier journals
+      # Returns: spanish_title and spanish_abstract
+      begin
+         spanish_title = ""
+         spanish_abstract = ""
+         nokogiri_html_page = Nokogiri::HTML(open(url, "User-Agent" => "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:29.0) Gecko/20100101 Firefox/29.0"))
+         spanish_title = nokogiri_html_page.css("div#centerInner.centerInner.svBigBox div#frag_1.page_fragment.auth_frag h1#tit0005.svTitle")[0].text.strip
+         abstracts = nokogiri_html_page.css("div#centerInner.centerInner.svBigBox div#frag_2.page_fragment div.abstract.svAbstract")
+         abstracts.each do |abstract|
+            if abstract.css("h2.secHeading")[0].text == "Resumen"
+               spanish_abstract = abstract.text.strip.gsub("Resumen","")
+            end
+         end
+         puts
+         puts "Title: " + spanish_title
+         puts
+         puts spanish_abstract
+         puts
+         return spanish_title, spanish_abstract
+      rescue Exception => e
+         puts "Exception scrape_spanish_title_abstract_elsevier"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   def scrape_spanish_title_abstract_ediciones_doyma(url)
+      # This function scrapes the title and abstract in Spanish
+      # of an article from elsevier ediciones doyma journals
+      # Returns: spanish_title and spanish_abstract
+      begin
+         res = Net::HTTP.get_response(URI(url))
+         location = res['location']
+         res = Net::HTTP.get_response(URI(location))
+         url = "http://www.elsevier.es" + res['location']
+         puts url
+         url = url.gsub("linkresolver","resumen-alternativo")
+         spanish_title = ""
+         spanish_abstract = ""
+         nokogiri_html_page = Nokogiri::HTML(open(url, "User-Agent" => "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:29.0) Gecko/20100101 Firefox/29.0"))
+         spanish_title = nokogiri_html_page.css("div#central article#colSimple.content-central section#elsevierItemTitulo h1")[0].text.strip
+         spanish_abstract = nokogiri_html_page.css("article#colSimple.content-central section#elsevierItemsResumenes div.elsevierItemsResumenIdioma span.texto")[1].text.strip
+         puts
+         puts "Title: " + spanish_title
+         puts
+         puts spanish_abstract
+         puts
+         return spanish_title, spanish_abstract
+      rescue Exception => e
+         puts "Exception scrape_spanish_title_abstract_ediciones_doyma"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   def annotate_esa
+      begin
+         Document.all.each do |document|
+            document.extract_esa_topics("",document.description)
+         end
+      rescue Exception => e
+         puts "exception annotate esa"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+   
+   def annotate_metamap
+      begin
+         Document.all.each do |document|
+            document.extract_metamap_topics(document.description)
+         end
+      rescue Exception => e
+         puts "exception annotate esa"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end   
+
+   def uvigomed_pl
+      begin
+         mesh_categories = obtain_mesh_categories
+         mesh_categories.each do |mesh_category|
+            puts "Category Name: " + mesh_category.to_s
+            puts "------------------------------------------------------"
+            puts
+            if ReutersNewItem.where(:people => "en").where("topics like '%" + mesh_category + "%'") != nil
+               puts "English elements with category " + mesh_category + ": " + ReutersNewItem.where(:people => "en").where("topics like '%" + mesh_category + "%'").size.to_s
+            end
+            if ReutersNewItem.where(:people => "en").where("topics like '" + mesh_category + "'") != nil
+               puts "English elements only with category " + mesh_category + ": " + ReutersNewItem.where(:people => "en").where("topics like '" + mesh_category + "'").size.to_s
+            end
+            if ReutersNewItem.where(:people => "es").where("topics like '%" + mesh_category + "%'") != nil
+               puts "Spanish elements with category " + mesh_category + ": " + ReutersNewItem.where(:people => "es").where("topics like '%" + mesh_category + "%'").size.to_s
+               puts "Valid Spanish elements with category " + mesh_category + ": " + ReutersNewItem.where(:people => "es").where('description is not null').where("topics like '%" + mesh_category + "%'").size.to_s
+            end
+            if ReutersNewItem.where(:people => "es").where("topics like '" + mesh_category + "'") != nil
+               puts "Spanish elements only with category " + mesh_category + ": " + ReutersNewItem.where(:people => "es").where("topics like '" + mesh_category + "'").size.to_s
+               puts "Valid Spanish elements only with category " + mesh_category + ": " + ReutersNewItem.where('description is not null').where(:people => "es").where("topics like '" + mesh_category + "'").size.to_s
+            end
+            puts ""
+         end
+         puts "Total elements: " + ReutersNewItem.all.size.to_s
+         puts "Total English elements: " + ReutersNewItem.where(:people => "en").size.to_s
+         puts "Total Spanish elements: " + ReutersNewItem.where(:people => "es").size.to_s
+         puts "Total valid Spanish elements: " + ReutersNewItem.where(:people => "es").where('description is not null').size.to_s
+
+      rescue Exception => e
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   def uvigomed_sl_metrics
+      begin
+         categories_list = "["
+         categories = Array.new
+         ReutersNewItem.all.each do |document|
+            categories << document.topics
+         end
+         categories = categories.uniq!
+         puts categories
+
+         categories.each do |category|
+            categories_list = categories_list + ('"' + category + '",')
+         end
+         categories_list = categories_list[0..-2]
+         categories_list = categories_list + "]"
+         puts categories_list
+      rescue Exception => e
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   def clean_ml_categories
+      begin
+         new_categories = Array.new
+         categories = ["Animal Diseases","Bacterial Infections and Mycoses","Cardiovascular Diseases","Chemically-Induced Disorders","Congenital Hereditary and Neonatal Diseases and Abnormalities","Digestive System Diseases","Disorders of Environmental Origin","Endocrine System Diseases","Eye Diseases","Female Urogenital Diseases and Pregnancy Complications","Hemic and Lymphatic Diseases","Immune System Diseases","Male Urogenital Diseases","Musculoskeletal Diseases","Neoplasms","Nervous System Diseases","Nutritional and Metabolic Diseases","Occupational Diseases","Otorhinolaryngologic Diseases","Parasitic Diseases","Pathological Conditions and Signs and Symptoms","Respiratory Tract Diseases","Skin and Connective Tissue Diseases","Stomatognathic Diseases","Virus Diseases","Wounds and Injuries"]
+         Document.all.each do |document|
+            puts "originals"
+            puts document.original_category
+            document.original_category.split(",").each do |category|
+               if categories.include? category
+                  new_categories << category
+               end
+            end
+            new_categories_string = new_categories.join(",")
+            new_categories.clear
+            puts "news"
+            puts new_categories_string
+            document.original_category = new_categories_string
+            document.save
+         end
+      rescue Exception => e
+         puts "Exception clean_ml_categories"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+
+   def document_language_correspondence
+      begin
+         Document.all.each do |resource|
+            resource.simplified_document_language_concept_correspondence(resource, "es","en")
+         end
+      rescue Exception => e
+         puts "Exception document_language_correspondence"
+         puts e.message
+         puts e.backtrace.inspect
+      end
+   end
+   
+
+
+
+end

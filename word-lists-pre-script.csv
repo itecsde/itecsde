@@ -1,0 +1,8 @@
+TAVEC-A:['taladradora','limones','cazadora','azafrán','uvas','comino','medias','pala','laurel','mandarinas','sierra','zapatos','romero','piña','tornillos','guantes']
+TAVEC-B:['espumadera','cerezas','atún','hierbabuena','kiwis','batidora','ajo','lenguados','pimentón','fresas','gallos','platos','albaricoques','trucha','orégano','cazuela']
+mobiliario:['banco','fuente','parada','acera','asfalto','baldosas','papelera','farolas','farola','rotonda','alcantarilla','baldosa','jardinera','contenedor','buzón']
+comercios:['taller','restaurante','cafetería','supermercado','panadería','carnicería','gasolinera','zapatería','tintorería','pescadería','heladería','frutería']
+vehículos:['coche','avión','tren','camión','autobús','bicicleta','moto','tranvía','patines','tractor','triciclo','patinete','monopatín']
+oficios:['policía','doctor','abogado','periodista','pintor','músico','fotógrafo','doctora','profesora','taxista','cartero','albañil','bombero','fotógrafa','dependienta']
+edificios:['teatro','iglesia','hospital','hospital','ayuntamiento','museo','colegio','estación','juzgado','metro','fábrica','farmacia','correos']
+herramientas:['sierra','escalera','casco','maletín','cono','cubo','linterna','chaleco','martillo','pincel','pala','manguera','taladro','polea','destornillador']
